@@ -1,0 +1,77 @@
+version: 2.1
+
+orbs:
+  coverage-reporter: codacy/coverage-reporter@11.5.0 # Invoke the Codacy Code Coverage orb
+  heroku: circleci/heroku@1.2.4 # Invoke the Heroku orb
+
+
+commands:
+  avoid_non-deployment_updates:
+    steps:
+      - run:
+          name: Avoid Non-Deployment Updates
+          command: |
+            changes=`git show --name-only ${CIRCLE_SHA1} | tail -n +7`
+
+            if [ "$changes" = ".circleci/config.yml" ] || [ "$changes" = "README.md" ]; then
+              echo "Only found a configuration or documentation change. Stopping build"
+              circleci-agent step halt
+            fi
+
+jobs:
+  build-and-test:
+    docker:
+      - image: circleci/node:14.17.1
+    steps:
+      - checkout
+      - avoid_non-deployment_updates
+      - restore_cache:
+          keys:
+            - yelpcamp-dependency-cache-v1-{{ checksum "package-lock.json" }}
+            - yelpcamp-dependency-cache-v1-
+      - run:
+          name: Install Dependencies
+          command: npm ci
+      - save_cache:
+          key: yelpcamp-dependency-cache-v1-{{ checksum "package-lock.json" }}
+          paths:
+            - /home/circleci/.npm
+      - run:
+          name: Run Tests
+          command: npm run test
+      - store_test_results:
+          path: ./coverage/jest
+      - store_artifacts:
+          path: ./coverage/lcov-report
+
+  codacy-coverage-report:
+    docker:
+      - image: 'circleci/openjdk:8-jdk'
+    steps:
+      - checkout
+      - avoid_non-deployment_updates
+      # run commands to generate the coverage result
+      - coverage-reporter/send_report:
+          coverage-reports: 'coverage/lcov.info'
+          project-token: $CODACY_PROJECT_TOKEN
+
+  deploy:
+    executor: heroku/default
+    steps:
+      - checkout
+      - avoid_non-deployment_updates
+      - heroku/install
+      - heroku/deploy-via-git
+
+workflows:
+  version: 2
+  build_test_deploy:
+     jobs:
+       - build-and-test
+       - codacy-coverage-report
+       - deploy: # Use the pre-configured job, deploy-via-git
+           requires:
+             - build-and-test # only run deploy-via-git job if this job has completed
+           filters:
+             branches:
+               only: master # only run deploy-via-git job on master branch
